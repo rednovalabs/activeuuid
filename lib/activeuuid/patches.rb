@@ -43,7 +43,7 @@ module ActiveUUID
         options = column_names.extract_options!
         column_names.each do |name|
           type = ActiveRecord::Base.connection.adapter_name.downcase == 'postgresql' ? 'uuid' : 'binary(16)'
-          column(name, "#{type}#{' PRIMARY KEY' if options.delete(:primary_key)}", options)
+          column(name, "#{type}#{' PRIMARY KEY' if options.delete(:primary_key)}", **options)
         end
       end
     end
