@@ -1,7 +1,7 @@
 require 'active_record'
 require 'active_support/concern'
 
-if ActiveRecord::VERSION::MAJOR == 4 and ActiveRecord::VERSION::MINOR == 2
+if ActiveRecord::VERSION::MAJOR >= 4
   module ActiveRecord
     module Type
       class UUID < Binary # :nodoc:
@@ -10,6 +10,10 @@ if ActiveRecord::VERSION::MAJOR == 4 and ActiveRecord::VERSION::MINOR == 2
         end
 
         def cast_value(value)
+          UUIDTools::UUID.serialize(value)
+        end
+
+        def serialize(value)
           UUIDTools::UUID.serialize(value)
         end
       end
@@ -45,28 +49,22 @@ module ActiveUUID
     end
 
     module Column
-      extend ActiveSupport::Concern
 
-      included do
-        def type_cast_with_uuid(value)
+      def type_cast(value)
           return UUIDTools::UUID.serialize(value) if type == :uuid
-          type_cast_without_uuid(value)
+          super(value)
         end
 
-        def type_cast_code_with_uuid(var_name)
+        def type_cast_code(var_name)
           return "UUIDTools::UUID.serialize(#{var_name})" if type == :uuid
-          type_cast_code_without_uuid(var_name)
+          super(var_name)
         end
 
-        def simplified_type_with_uuid(field_type)
+        def simplified_type(field_type)
           return :uuid if field_type == 'binary(16)' || field_type == 'binary(16,0)'
-          simplified_type_without_uuid(field_type)
+          super(field_type)
         end
 
-        alias_method_chain :type_cast, :uuid
-        alias_method_chain :type_cast_code, :uuid if ActiveRecord::VERSION::MAJOR < 4
-        alias_method_chain :simplified_type, :uuid
-      end
     end
 
     module MysqlJdbcColumn
@@ -96,104 +94,85 @@ module ActiveUUID
 
 
     module PostgreSQLColumn
-      extend ActiveSupport::Concern
 
-      included do
-        def type_cast_with_uuid(value)
-          return UUIDTools::UUID.serialize(value) if type == :uuid
-          type_cast_without_uuid(value)
-        end
-        alias_method_chain :type_cast, :uuid if ActiveRecord::VERSION::MAJOR >= 4
+      def type_cast(value)
+        return UUIDTools::UUID.serialize(value) if type == :uuid
+        super(value)
+      end
 
-        def simplified_type_with_pguuid(field_type)
-          return :uuid if field_type == 'uuid'
-          simplified_type_without_pguuid(field_type)
-        end
-
-        alias_method_chain :simplified_type, :pguuid
+      def simplified_type(field_type)
+        return :uuid if field_type == 'uuid'
+        super(field_type)
       end
     end
 
     module Quoting
-      extend ActiveSupport::Concern
-
-      included do
-        def quote_with_visiting(value, column = nil)
-          value = UUIDTools::UUID.serialize(value) if column && column.type == :uuid
-          quote_without_visiting(value, column)
+      def quote(value, column = nil)
+        value = UUIDTools::UUID.serialize(value) if column && column.type == :uuid
+        if ActiveRecord::VERSION::MAJOR == 6
+          super(value)
+        else
+          super(value, column)
         end
+      end
 
-        def type_cast_with_visiting(value, column = nil)
-          value = UUIDTools::UUID.serialize(value) if column && column.type == :uuid
-          type_cast_without_visiting(value, column)
-        end
+      def type_cast(value, column = nil)
+        value = UUIDTools::UUID.serialize(value) if column && column.type == :uuid
+        super(value, column)
+      end
 
-        def native_database_types_with_uuid
-          @native_database_types ||= native_database_types_without_uuid.merge(uuid: { name: 'binary', limit: 16 })
-        end
-
-        alias_method_chain :quote, :visiting
-        alias_method_chain :type_cast, :visiting
-        alias_method_chain :native_database_types, :uuid
+      def native_database_types
+        @native_database_types ||= super.merge(uuid: { name: 'binary', limit: 16 })
       end
     end
 
     module PostgreSQLQuoting
-      extend ActiveSupport::Concern
+      def quote(value, column = nil)
+        value = UUIDTools::UUID.serialize(value) if column && column.type == :uuid
+        value = value.to_s if value.is_a? UUIDTools::UUID
+        super(value, column)
+      end
 
-      included do
-        def quote_with_visiting(value, column = nil)
-          value = UUIDTools::UUID.serialize(value) if column && column.type == :uuid
-          value = value.to_s if value.is_a? UUIDTools::UUID
-          quote_without_visiting(value, column)
-        end
+      def type_cast(value, column = nil, *args)
+        value = UUIDTools::UUID.serialize(value) if column && column.type == :uuid
+        value = value.to_s if value.is_a? UUIDTools::UUID
+        super(value, column, *args)
+      end
 
-        def type_cast_with_visiting(value, column = nil, *args)
-          value = UUIDTools::UUID.serialize(value) if column && column.type == :uuid
-          value = value.to_s if value.is_a? UUIDTools::UUID
-          type_cast_without_visiting(value, column, *args)
-        end
-
-        def native_database_types_with_pguuid
-          @native_database_types ||= native_database_types_without_pguuid.merge(uuid: { name: 'uuid' })
-        end
-
-        alias_method_chain :quote, :visiting
-        alias_method_chain :type_cast, :visiting
-        alias_method_chain :native_database_types, :pguuid
+      def native_database_types
+        @native_database_types ||= super.merge(uuid: { name: 'uuid' })
       end
     end
 
     module AbstractAdapter
-      extend ActiveSupport::Concern
-
-      included do
-        def initialize_type_map_with_uuid(m)
-          initialize_type_map_without_uuid(m)
-          register_class_with_limit m, /binary\(16(,0)?\)/i, ::ActiveRecord::Type::UUID
-        end
-
-        alias_method_chain :initialize_type_map, :uuid
+      def initialize_type_map(m)
+        super(m)
+        register_class_with_limit m, /binary\(16(,0)?\)/i, ::ActiveRecord::Type::UUID
       end
     end
 
     def self.apply!
-      ActiveRecord::ConnectionAdapters::Table.send :include, Migrations if defined? ActiveRecord::ConnectionAdapters::Table
-      ActiveRecord::ConnectionAdapters::TableDefinition.send :include, Migrations if defined? ActiveRecord::ConnectionAdapters::TableDefinition
+      # need to require adapters because in load time somehow they don't exists #WEIRD
+      require 'active_record/connection_adapters/mysql2_adapter' if Gem.loaded_specs.has_key? 'mysql2'
+      require 'active_record/connection_adapters/sqlite3_adapter' if Gem.loaded_specs.has_key? 'sqlite3'
+      require 'active_record/connection_adapters/postgresql_adapter' if Gem.loaded_specs.has_key? 'pg'
 
-      if ActiveRecord::VERSION::MAJOR == 4 and ActiveRecord::VERSION::MINOR == 2
-        ActiveRecord::ConnectionAdapters::Mysql2Adapter.send :include, AbstractAdapter if defined? ActiveRecord::ConnectionAdapters::Mysql2Adapter
-        ActiveRecord::ConnectionAdapters::SQLite3Adapter.send :include, AbstractAdapter if defined? ActiveRecord::ConnectionAdapters::SQLite3Adapter
+      ActiveRecord::ConnectionAdapters::Table.send :prepend, Migrations if defined? ActiveRecord::ConnectionAdapters::Table
+      ActiveRecord::ConnectionAdapters::TableDefinition.send :prepend, Migrations if defined? ActiveRecord::ConnectionAdapters::TableDefinition
+
+      if ActiveRecord::VERSION::MAJOR >= 4
+        ActiveRecord::ConnectionAdapters::Mysql2Adapter.send :prepend, AbstractAdapter if defined? ActiveRecord::ConnectionAdapters::Mysql2Adapter
+        ActiveRecord::ConnectionAdapters::SQLite3Adapter.send :prepend, AbstractAdapter if defined? ActiveRecord::ConnectionAdapters::SQLite3Adapter
       else
-        ActiveRecord::ConnectionAdapters::Column.send :include, Column
-        ActiveRecord::ConnectionAdapters::PostgreSQLColumn.send :include, PostgreSQLColumn if defined? ActiveRecord::ConnectionAdapters::PostgreSQLColumn
+        ActiveRecord::ConnectionAdapters::Column.send :prepend, Column
+        ActiveRecord::ConnectionAdapters::PostgreSQLColumn.send :prepend, PostgreSQLColumn if defined? ActiveRecord::ConnectionAdapters::PostgreSQLColumn
       end
       ArJdbc::MySQL::Column.send :include, MysqlJdbcColumn if defined? ArJdbc::MySQL::Column
 
-      ActiveRecord::ConnectionAdapters::MysqlAdapter.send :include, Quoting if defined? ActiveRecord::ConnectionAdapters::MysqlAdapter
-      ActiveRecord::ConnectionAdapters::Mysql2Adapter.send :include, Quoting if defined? ActiveRecord::ConnectionAdapters::Mysql2Adapter
-      ActiveRecord::ConnectionAdapters::SQLite3Adapter.send :include, Quoting if defined? ActiveRecord::ConnectionAdapters::SQLite3Adapter
-      ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.send :include, PostgreSQLQuoting if defined? ActiveRecord::ConnectionAdapters::PostgreSQLAdapter
+      ActiveRecord::ConnectionAdapters::MysqlAdapter.send :prepend, Quoting if defined? ActiveRecord::ConnectionAdapters::MysqlAdapter
+      ActiveRecord::ConnectionAdapters::Mysql2Adapter.send :prepend, Quoting if defined? ActiveRecord::ConnectionAdapters::Mysql2Adapter
+      ActiveRecord::ConnectionAdapters::SQLite3Adapter.send :prepend, Quoting if defined? ActiveRecord::ConnectionAdapters::SQLite3Adapter
+      ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.send :prepend, PostgreSQLQuoting if defined? ActiveRecord::ConnectionAdapters::PostgreSQLAdapter
     end
   end
 end
